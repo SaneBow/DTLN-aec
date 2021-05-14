@@ -19,8 +19,10 @@ This code is licensed under the terms of the MIT-license.
 import soundfile as sf
 import numpy as np
 import os
+import time
 import argparse
-import tensorflow.lite as tflite
+# import tensorflow.lite as tflite
+import tflite_runtime.interpreter as tflite
 
 # make GPUs invisible
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -85,7 +87,9 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
     # calculate number of frames
     num_blocks = (audio.shape[0] - (block_len - block_shift)) // block_shift
     # iterate over the number of frames
+    time_array = []
     for idx in range(num_blocks):
+        start_time = time.time()
         # shift values and write to buffer of the input audio
         in_buffer[:-block_shift] = in_buffer[block_shift:]
         in_buffer[-block_shift:] = audio[
@@ -138,6 +142,8 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
         out_file[idx * block_shift : (idx * block_shift) + block_shift] = out_buffer[
             :block_shift
         ]
+        time_array.append(time.time()-start_time)
+
     # cut audio to otiginal length
     predicted_speech = out_file[
         (block_len - block_shift) : (block_len - block_shift) + len_audio
@@ -147,6 +153,8 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
         predicted_speech = predicted_speech / np.max(predicted_speech) * 0.99
     # write output file
     sf.write(out_file_name, predicted_speech, fs)
+    print('Processing Time [ms]:')
+    print(np.mean(np.stack(time_array))*1000)
 
 
 def process_folder(model, folder_name, new_folder_name):
