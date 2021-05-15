@@ -29,24 +29,7 @@ import multiprocessing
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 
-def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
-    """
-    Funtion to read an audio file, rocess it by the network and write the
-    enhanced audio to .wav file.
-
-    Parameters
-    ----------
-    interpreter_1 : TF-LITE INTERPRETER
-        TF-lite interpreter of first model part
-    interpreter_2 : TF-LITE INTERPRETER
-        TF-lite interpreter of second model part
-
-    audio_file_name : STRING
-        Name and path of the input audio file.
-    out_file_name : STRING
-        Name and path of the target file.
-
-    """
+def process_file(model, audio_file_name, out_file_name):
 
     # read audio
     audio, fs = sf.read(audio_file_name)
@@ -103,11 +86,13 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
             # print("input shifter idx:", idx)
         _q.put((None, None))
 
-    def stage1(_qi, _qo, interpreter_1, _tq):
+    def stage1(model, _qi, _qo, _tq, threads=1):
+        interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=threads)
+        interpreter_1.allocate_tensors()
         input_details_1 = interpreter_1.get_input_details()
         output_details_1 = interpreter_1.get_output_details()
         states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
-        # idx = 0
+        idx = 0
         while True:
             in_buffer, in_buffer_lpb = _qi.get()
             if in_buffer is None:
@@ -134,16 +119,18 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
             out_mask = interpreter_1.get_tensor(output_details_1[0]["index"])
             states_1 = interpreter_1.get_tensor(output_details_1[1]["index"])
             _qo.put((in_buffer_lpb, in_block_fft, out_mask))
-            # print("stage1:", idx)
-            # idx += 1
+            print("stage1:", idx)
+            idx += 1
             _tq.put(time.time() - start_time)
 
-    def stage2(_qi, _qo, interpreter_2, _tq):
+    def stage2(model, _qi, _qo, _tq, threads=1):
+        interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=threads)
+        interpreter_2.allocate_tensors()
         input_details_2 = interpreter_2.get_input_details()
         output_details_2 = interpreter_2.get_output_details()
         states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
         out_buffer = np.zeros((block_len)).astype("float32")
-        # idx = 0
+        idx = 0
         while True:
             in_buffer_lpb, in_block_fft, out_mask = _qi.get()
             if in_block_fft is None:
@@ -170,14 +157,14 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
             out_buffer[-block_shift:] = np.zeros((block_shift))
             out_buffer += np.squeeze(out_block)
             _qo.put(out_buffer)
-            # print("stage2:", idx)
-            # idx += 1
+            print("stage2:", idx)
+            idx += 1
             _tq.put(time.time() - start_time)
 
 
     p1 = multiprocessing.Process(target=shifter, args=[q1, audio, lpb, num_blocks])
-    p2 = multiprocessing.Process(target=stage1, args=[q1, q2, interpreter_1, tq1])
-    p3 = multiprocessing.Process(target=stage2, args=[q2, q3, interpreter_2, tq2])
+    p2 = multiprocessing.Process(target=stage1, args=[model, q1, q2, tq1])
+    p3 = multiprocessing.Process(target=stage2, args=[model, q2, q3, tq2])
     for p in [p1, p2, p3]:
         p.start()
 
@@ -230,12 +217,6 @@ def process_folder(model, folder_name, new_folder_name):
 
     """
 
-    # create interpreters
-    interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=1)
-    interpreter_1.allocate_tensors()
-    interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=1)
-    interpreter_2.allocate_tensors()
-
     # empty list for file and folder names
     file_names = []
     directories = []
@@ -258,8 +239,7 @@ def process_folder(model, folder_name, new_folder_name):
 
         # process each file with the mode
         process_file(
-            interpreter_1,
-            interpreter_2,
+            model,
             os.path.join(directories[idx], file_names[idx]),
             os.path.join(new_directories[idx], file_names[idx]),
         )
