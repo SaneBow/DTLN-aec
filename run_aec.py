@@ -81,7 +81,8 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
     q1 = multiprocessing.Queue()
     q2 = multiprocessing.Queue()
     q3 = multiprocessing.Queue()
-    tq = multiprocessing.Queue()
+    tq1 = multiprocessing.Queue()
+    tq2 = multiprocessing.Queue() 
 
     def shifter(_q, audio, lpb, num_blocks):
         in_buffer = np.zeros((block_len)).astype("float32")
@@ -108,11 +109,11 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
         states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
         # idx = 0
         while True:
-            start_time = time.time()
             in_buffer, in_buffer_lpb = _qi.get()
             if in_buffer is None:
                 _qo.put((None, None, None))
                 return
+            start_time = time.time()
             # calculate fft of input block
             in_block_fft = np.fft.rfft(np.squeeze(in_buffer)).astype("complex64")
 
@@ -144,12 +145,11 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
         out_buffer = np.zeros((block_len)).astype("float32")
         # idx = 0
         while True:
-            start_time = time.time()
             in_buffer_lpb, in_block_fft, out_mask = _qi.get()
             if in_block_fft is None:
                 _qo.put(None)
                 return
-
+            start_time = time.time()
             # apply mask and calculate the ifft
             estimated_block = np.fft.irfft(in_block_fft * out_mask)
             # reshape the time domain frames
@@ -176,20 +176,21 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
 
 
     p1 = multiprocessing.Process(target=shifter, args=[q1, audio, lpb, num_blocks])
-    p2 = multiprocessing.Process(target=stage1, args=[q1, q2, interpreter_1, tq])
-    p3 = multiprocessing.Process(target=stage2, args=[q2, q3, interpreter_2, tq])
+    p2 = multiprocessing.Process(target=stage1, args=[q1, q2, interpreter_1, tq1])
+    p3 = multiprocessing.Process(target=stage2, args=[q2, q3, interpreter_2, tq2])
     for p in [p1, p2, p3]:
         p.start()
 
-    time_array = []
+    time_array1 = []
+    time_array2 = []
     for idx in range(num_blocks):
         # print("get out buf idx:", idx)
         out_buffer =  q3.get()
         out_file[idx * block_shift : (idx * block_shift) + block_shift] = out_buffer[
             :block_shift
         ]
-        time_array.append(tq.get())
-        time_array.append(tq.get())
+        time_array1.append(tq1.get())
+        time_array2.append(tq2.get())
 
 
     for p in [p1, p2, p3]:
@@ -206,7 +207,8 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
     # write output file
     sf.write(out_file_name, predicted_speech, fs)
     print('Processing Time [ms]:')
-    print(np.mean(np.stack(time_array))*1000)
+    print(np.mean(np.stack(time_array1))*1000)
+    print(np.mean(np.stack(time_array2))*1000)
 
 
 def process_folder(model, folder_name, new_folder_name):
