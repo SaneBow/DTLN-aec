@@ -82,7 +82,7 @@ def process_file(model, audio_file_name, out_file_name):
                 idx * block_shift : (idx * block_shift) + block_shift
             ]
 
-            _q.put((in_buffer, in_buffer_lpb))
+            _q.put((in_buffer.copy(), in_buffer_lpb.copy()))
             # print("input shifter idx:", idx)
         _q.put((None, None))
 
@@ -92,7 +92,7 @@ def process_file(model, audio_file_name, out_file_name):
         input_details_1 = interpreter_1.get_input_details()
         output_details_1 = interpreter_1.get_output_details()
         states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
-        idx = 0
+        # idx = 0
         while True:
             in_buffer, in_buffer_lpb = _qi.get()
             if in_buffer is None:
@@ -118,9 +118,9 @@ def process_file(model, audio_file_name, out_file_name):
             # # get the output of the first block
             out_mask = interpreter_1.get_tensor(output_details_1[0]["index"])
             states_1 = interpreter_1.get_tensor(output_details_1[1]["index"])
-            _qo.put((in_buffer_lpb, in_block_fft, out_mask))
-            print("stage1:", idx)
-            idx += 1
+            _qo.put((in_buffer_lpb.copy(), in_block_fft.copy(), out_mask.copy()))
+            # print("stage1:", idx)
+            # idx += 1
             _tq.put(time.time() - start_time)
 
     def stage2(model, _qi, _qo, _tq, threads=1):
@@ -130,7 +130,7 @@ def process_file(model, audio_file_name, out_file_name):
         output_details_2 = interpreter_2.get_output_details()
         states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
         out_buffer = np.zeros((block_len)).astype("float32")
-        idx = 0
+        # idx = 0
         while True:
             in_buffer_lpb, in_block_fft, out_mask = _qi.get()
             if in_block_fft is None:
@@ -156,9 +156,9 @@ def process_file(model, audio_file_name, out_file_name):
             out_buffer[:-block_shift] = out_buffer[block_shift:]
             out_buffer[-block_shift:] = np.zeros((block_shift))
             out_buffer += np.squeeze(out_block)
-            _qo.put(out_buffer)
-            print("stage2:", idx)
-            idx += 1
+            _qo.put(out_buffer.copy())
+            # print("stage2:", idx)
+            # idx += 1
             _tq.put(time.time() - start_time)
 
 
