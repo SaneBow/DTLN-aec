@@ -23,6 +23,7 @@ import time
 import argparse
 # import tensorflow.lite as tflite
 import tflite_runtime.interpreter as tflite
+import multiprocessing
 
 # make GPUs invisible
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -70,79 +71,130 @@ def process_file(interpreter_1, interpreter_2, audio_file_name, out_file_name):
     padding = np.zeros((block_len - block_shift))
     audio = np.concatenate((padding, audio, padding))
     lpb = np.concatenate((padding, lpb, padding))
-    # get details from interpreters
-    input_details_1 = interpreter_1.get_input_details()
-    output_details_1 = interpreter_1.get_output_details()
-    input_details_2 = interpreter_2.get_input_details()
-    output_details_2 = interpreter_2.get_output_details()
-    # preallocate states for lstms
-    states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
-    states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
+
     # preallocate out file
     out_file = np.zeros((len(audio)))
     # create buffer
-    in_buffer = np.zeros((block_len)).astype("float32")
-    in_buffer_lpb = np.zeros((block_len)).astype("float32")
-    out_buffer = np.zeros((block_len)).astype("float32")
+
     # calculate number of frames
     num_blocks = (audio.shape[0] - (block_len - block_shift)) // block_shift
-    # iterate over the number of frames
+    q1 = multiprocessing.Queue()
+    q2 = multiprocessing.Queue()
+    q3 = multiprocessing.Queue()
+    tq = multiprocessing.Queue()
+
+    def shifter(_q, audio, lpb, num_blocks):
+        in_buffer = np.zeros((block_len)).astype("float32")
+        in_buffer_lpb = np.zeros((block_len)).astype("float32")
+        for idx in range(num_blocks):
+            # shift values and write to buffer of the input audio
+            in_buffer[:-block_shift] = in_buffer[block_shift:]
+            in_buffer[-block_shift:] = audio[
+                idx * block_shift : (idx * block_shift) + block_shift
+            ]
+            # shift values and write to buffer of the loopback audio
+            in_buffer_lpb[:-block_shift] = in_buffer_lpb[block_shift:]
+            in_buffer_lpb[-block_shift:] = lpb[
+                idx * block_shift : (idx * block_shift) + block_shift
+            ]
+
+            _q.put((in_buffer, in_buffer_lpb))
+            # print("input shifter idx:", idx)
+        _q.put((None, None))
+
+    def stage1(_qi, _qo, interpreter_1, _tq):
+        input_details_1 = interpreter_1.get_input_details()
+        output_details_1 = interpreter_1.get_output_details()
+        states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
+        # idx = 0
+        while True:
+            start_time = time.time()
+            in_buffer, in_buffer_lpb = _qi.get()
+            if in_buffer is None:
+                _qo.put((None, None, None))
+                return
+            # calculate fft of input block
+            in_block_fft = np.fft.rfft(np.squeeze(in_buffer)).astype("complex64")
+
+            # create magnitude
+            in_mag = np.abs(in_block_fft)
+            in_mag = np.reshape(in_mag, (1, 1, -1)).astype("float32")
+            # calculate log pow of lpb
+            lpb_block_fft = np.fft.rfft(np.squeeze(in_buffer_lpb)).astype("complex64")
+            lpb_mag = np.abs(lpb_block_fft)
+            lpb_mag = np.reshape(lpb_mag, (1, 1, -1)).astype("float32")
+            # set tensors to the first model
+            interpreter_1.set_tensor(input_details_1[0]["index"], in_mag)
+            interpreter_1.set_tensor(input_details_1[2]["index"], lpb_mag)
+            interpreter_1.set_tensor(input_details_1[1]["index"], states_1)
+            # run calculation
+            interpreter_1.invoke()
+            # # get the output of the first block
+            out_mask = interpreter_1.get_tensor(output_details_1[0]["index"])
+            states_1 = interpreter_1.get_tensor(output_details_1[1]["index"])
+            _qo.put((in_buffer_lpb, in_block_fft, out_mask))
+            # print("stage1:", idx)
+            # idx += 1
+            _tq.put(time.time() - start_time)
+
+    def stage2(_qi, _qo, interpreter_2, _tq):
+        input_details_2 = interpreter_2.get_input_details()
+        output_details_2 = interpreter_2.get_output_details()
+        states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
+        out_buffer = np.zeros((block_len)).astype("float32")
+        # idx = 0
+        while True:
+            start_time = time.time()
+            in_buffer_lpb, in_block_fft, out_mask = _qi.get()
+            if in_block_fft is None:
+                _qo.put(None)
+                return
+
+            # apply mask and calculate the ifft
+            estimated_block = np.fft.irfft(in_block_fft * out_mask)
+            # reshape the time domain frames
+            estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
+            in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
+            # set tensors to the second block
+            interpreter_2.set_tensor(input_details_2[1]["index"], states_2)
+            interpreter_2.set_tensor(input_details_2[0]["index"], estimated_block)
+            interpreter_2.set_tensor(input_details_2[2]["index"], in_lpb)
+            # run calculation
+            interpreter_2.invoke()
+            # get output tensors
+            out_block = interpreter_2.get_tensor(output_details_2[0]["index"])
+            states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
+
+            # shift values and write to buffer
+            out_buffer[:-block_shift] = out_buffer[block_shift:]
+            out_buffer[-block_shift:] = np.zeros((block_shift))
+            out_buffer += np.squeeze(out_block)
+            _qo.put(out_buffer)
+            # print("stage2:", idx)
+            # idx += 1
+            _tq.put(time.time() - start_time)
+
+
+    p1 = multiprocessing.Process(target=shifter, args=[q1, audio, lpb, num_blocks])
+    p2 = multiprocessing.Process(target=stage1, args=[q1, q2, interpreter_1, tq])
+    p3 = multiprocessing.Process(target=stage2, args=[q2, q3, interpreter_2, tq])
+    for p in [p1, p2, p3]:
+        p.start()
+
     time_array = []
     for idx in range(num_blocks):
-        start_time = time.time()
-        # shift values and write to buffer of the input audio
-        in_buffer[:-block_shift] = in_buffer[block_shift:]
-        in_buffer[-block_shift:] = audio[
-            idx * block_shift : (idx * block_shift) + block_shift
-        ]
-        # shift values and write to buffer of the loopback audio
-        in_buffer_lpb[:-block_shift] = in_buffer_lpb[block_shift:]
-        in_buffer_lpb[-block_shift:] = lpb[
-            idx * block_shift : (idx * block_shift) + block_shift
-        ]
-
-        # calculate fft of input block
-        in_block_fft = np.fft.rfft(np.squeeze(in_buffer)).astype("complex64")
-        # create magnitude
-        in_mag = np.abs(in_block_fft)
-        in_mag = np.reshape(in_mag, (1, 1, -1)).astype("float32")
-        # calculate log pow of lpb
-        lpb_block_fft = np.fft.rfft(np.squeeze(in_buffer_lpb)).astype("complex64")
-        lpb_mag = np.abs(lpb_block_fft)
-        lpb_mag = np.reshape(lpb_mag, (1, 1, -1)).astype("float32")
-        # set tensors to the first model
-        interpreter_1.set_tensor(input_details_1[0]["index"], in_mag)
-        interpreter_1.set_tensor(input_details_1[2]["index"], lpb_mag)
-        interpreter_1.set_tensor(input_details_1[1]["index"], states_1)
-        # run calculation
-        interpreter_1.invoke()
-        # # get the output of the first block
-        out_mask = interpreter_1.get_tensor(output_details_1[0]["index"])
-        states_1 = interpreter_1.get_tensor(output_details_1[1]["index"])
-        # apply mask and calculate the ifft
-        estimated_block = np.fft.irfft(in_block_fft * out_mask)
-        # reshape the time domain frames
-        estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
-        in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
-        # set tensors to the second block
-        interpreter_2.set_tensor(input_details_2[1]["index"], states_2)
-        interpreter_2.set_tensor(input_details_2[0]["index"], estimated_block)
-        interpreter_2.set_tensor(input_details_2[2]["index"], in_lpb)
-        # run calculation
-        interpreter_2.invoke()
-        # get output tensors
-        out_block = interpreter_2.get_tensor(output_details_2[0]["index"])
-        states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
-
-        # shift values and write to buffer
-        out_buffer[:-block_shift] = out_buffer[block_shift:]
-        out_buffer[-block_shift:] = np.zeros((block_shift))
-        out_buffer += np.squeeze(out_block)
-        # write block to output file
+        # print("get out buf idx:", idx)
+        out_buffer =  q3.get()
         out_file[idx * block_shift : (idx * block_shift) + block_shift] = out_buffer[
             :block_shift
         ]
-        time_array.append(time.time()-start_time)
+        time_array.append(tq.get())
+        time_array.append(tq.get())
+
+
+    for p in [p1, p2, p3]:
+        p.join()
+
 
     # cut audio to otiginal length
     predicted_speech = out_file[
@@ -177,9 +229,9 @@ def process_folder(model, folder_name, new_folder_name):
     """
 
     # create interpreters
-    interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite")
+    interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=1)
     interpreter_1.allocate_tensors()
-    interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite")
+    interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=1)
     interpreter_2.allocate_tensors()
 
     # empty list for file and folder names
