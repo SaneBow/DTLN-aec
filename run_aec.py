@@ -64,8 +64,6 @@ def process_file(model, audio_file_name, out_file_name):
     q1 = multiprocessing.Queue()
     q2 = multiprocessing.Queue()
     q3 = multiprocessing.Queue()
-    tq1 = multiprocessing.Queue()
-    tq2 = multiprocessing.Queue() 
 
     def shifter(_q, audio, lpb, num_blocks):
         in_buffer = np.zeros((block_len)).astype("float32")
@@ -83,10 +81,9 @@ def process_file(model, audio_file_name, out_file_name):
             ]
 
             _q.put((in_buffer.copy(), in_buffer_lpb.copy()))
-            # print("input shifter idx:", idx)
         _q.put((None, None))
 
-    def stage1(model, _qi, _qo, _tq, threads=1):
+    def stage1(model, _qi, _qo, threads):
         interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=threads)
         interpreter_1.allocate_tensors()
         input_details_1 = interpreter_1.get_input_details()
@@ -96,9 +93,8 @@ def process_file(model, audio_file_name, out_file_name):
         while True:
             in_buffer, in_buffer_lpb = _qi.get()
             if in_buffer is None:
-                _qo.put((None, None, None))
+                _qo.put((None, None))
                 return
-            start_time = time.time()
             # calculate fft of input block
             in_block_fft = np.fft.rfft(np.squeeze(in_buffer)).astype("complex64")
 
@@ -118,30 +114,26 @@ def process_file(model, audio_file_name, out_file_name):
             # # get the output of the first block
             out_mask = interpreter_1.get_tensor(output_details_1[0]["index"])
             states_1 = interpreter_1.get_tensor(output_details_1[1]["index"])
-            _qo.put((in_buffer_lpb.copy(), in_block_fft.copy(), out_mask.copy()))
-            # print("stage1:", idx)
-            # idx += 1
-            _tq.put(time.time() - start_time)
-
-    def stage2(model, _qi, _qo, _tq, threads=1):
-        interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=threads)
-        interpreter_2.allocate_tensors()
-        input_details_2 = interpreter_2.get_input_details()
-        output_details_2 = interpreter_2.get_output_details()
-        states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
-        out_buffer = np.zeros((block_len)).astype("float32")
-        # idx = 0
-        while True:
-            in_buffer_lpb, in_block_fft, out_mask = _qi.get()
-            if in_block_fft is None:
-                _qo.put(None)
-                return
-            start_time = time.time()
             # apply mask and calculate the ifft
             estimated_block = np.fft.irfft(in_block_fft * out_mask)
             # reshape the time domain frames
             estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
             in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
+            _qo.put((estimated_block.copy(), in_lpb.copy()))
+   
+
+    def stage2(model, _qi, _qo, threads):
+        interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=threads)
+        interpreter_2.allocate_tensors()
+        input_details_2 = interpreter_2.get_input_details()
+        output_details_2 = interpreter_2.get_output_details()
+        states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
+        while True:
+            estimated_block, in_lpb = _qi.get()
+            if estimated_block is None:
+                _qo.put(None)
+                return
+
             # set tensors to the second block
             interpreter_2.set_tensor(input_details_2[1]["index"], states_2)
             interpreter_2.set_tensor(input_details_2[0]["index"], estimated_block)
@@ -152,32 +144,28 @@ def process_file(model, audio_file_name, out_file_name):
             out_block = interpreter_2.get_tensor(output_details_2[0]["index"])
             states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
 
-            # shift values and write to buffer
-            out_buffer[:-block_shift] = out_buffer[block_shift:]
-            out_buffer[-block_shift:] = np.zeros((block_shift))
-            out_buffer += np.squeeze(out_block)
-            _qo.put(out_buffer.copy())
-            # print("stage2:", idx)
-            # idx += 1
-            _tq.put(time.time() - start_time)
+            _qo.put(out_block.copy())
 
 
     p1 = multiprocessing.Process(target=shifter, args=[q1, audio, lpb, num_blocks])
-    p2 = multiprocessing.Process(target=stage1, args=[model, q1, q2, tq1])
-    p3 = multiprocessing.Process(target=stage2, args=[model, q2, q3, tq2])
+    p2 = multiprocessing.Process(target=stage1, args=(model, q1, q2, args.threads))
+    p3 = multiprocessing.Process(target=stage2, args=(model, q2, q3, args.threads))
     for p in [p1, p2, p3]:
         p.start()
 
-    time_array1 = []
-    time_array2 = []
+    out_buffer = np.zeros((block_len)).astype("float32")
+    time_array = []
     for idx in range(num_blocks):
-        # print("get out buf idx:", idx)
-        out_buffer =  q3.get()
+        s = time.time()
+        out_block =  q3.get()
+        time_array.append(time.time()-s)
+        # shift values and write to buffer
+        out_buffer[:-block_shift] = out_buffer[block_shift:]
+        out_buffer[-block_shift:] = np.zeros((block_shift))
+        out_buffer += np.squeeze(out_block)
         out_file[idx * block_shift : (idx * block_shift) + block_shift] = out_buffer[
             :block_shift
         ]
-        time_array1.append(tq1.get())
-        time_array2.append(tq2.get())
 
 
     for p in [p1, p2, p3]:
@@ -194,8 +182,7 @@ def process_file(model, audio_file_name, out_file_name):
     # write output file
     sf.write(out_file_name, predicted_speech, fs)
     print('Processing Time [ms]:')
-    print(np.mean(np.stack(time_array1))*1000)
-    print(np.mean(np.stack(time_array2))*1000)
+    print(np.mean(np.stack(time_array))*1000)
 
 
 def process_folder(model, folder_name, new_folder_name):
@@ -252,6 +239,7 @@ if __name__ == "__main__":
     parser.add_argument("--in_folder", "-i", help="folder with input files")
     parser.add_argument("--out_folder", "-o", help="target folder for processed files")
     parser.add_argument("--model", "-m", help="name of tf-lite model")
+    parser.add_argument("--threads", "-t", type=int, default=1, help="set thread number for interpreters")
     args = parser.parse_args()
 
     # process the folder
