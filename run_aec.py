@@ -177,9 +177,9 @@ def process_folder(model, folder_name, new_folder_name):
     """
 
     # create interpreters
-    interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite")
+    interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=args.threads)
     interpreter_1.allocate_tensors()
-    interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite")
+    interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=args.threads)
     interpreter_2.allocate_tensors()
 
     # empty list for file and folder names
@@ -218,6 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--in_folder", "-i", help="folder with input files")
     parser.add_argument("--out_folder", "-o", help="target folder for processed files")
     parser.add_argument("--model", "-m", help="name of tf-lite model")
+    parser.add_argument("--threads", "-t", type=int, default=1, help="threads for interpreters")
     args = parser.parse_args()
 
     # process the folder
