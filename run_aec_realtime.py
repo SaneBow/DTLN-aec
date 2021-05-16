@@ -47,6 +47,7 @@ parser.add_argument("--output_device", "-o", help="output device (speaker)")
 parser.add_argument("--model", "-m", help="name of tf-lite model")
 parser.add_argument("--latency", "-l", type=float, default=0, help="latency of sound device")
 parser.add_argument("--threads", "-t", type=int, default=1, help="set thread number for interpreters")
+parser.add_argument("--channels", "-c", type=int, default=2, help="number of input channels")
 args = parser.parse_args()
 
 interpreter_1 = tflite.Interpreter(model_path=args.model + "_1.tflite", num_threads=args.threads)
@@ -150,7 +151,7 @@ try:
     with sd.InputStream(device=args.input_device,
                 samplerate=16000, blocksize=block_shift,
                 dtype=np.float32, latency=args.latency,
-                channels=6, callback=in_callback), sd.OutputStream(device=args.output_device,
+                channels=args.channels, callback=in_callback), sd.OutputStream(device=args.output_device,
                 samplerate=16000, blocksize=block_shift,
                 dtype=np.float32, latency=args.latency,
                 channels=1, callback=out_callback):

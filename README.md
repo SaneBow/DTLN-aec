@@ -5,6 +5,7 @@ The purpose of fork is try to make this usable on Raspberry Pi.
 * Add time measurement function (realtime process requires < 8ms ). Right now on my Pi 3B+ 64bit is ~12ms. Need < 8ms :()
 * Add option `--threads` to set `num_threads` for Interpreter. But seems not much faster with it.
 * Try to optimize with multiprocessing (interpreter 1 and interpreter 2 run in parallel). But it turns out giving not much improvement :()
+* Add `run_aec_realtime.py` for realtime device in/out. Assume input device's channel 0 is the recording and the last channel is playback. Can use `--channels` to set channel numbers for input device.
 # DTLN-aec
 This Repostory contains the pretrained DTLN-aec model for real-time acoustic echo cancellation in TF-lite format. This model was handed in to the acoustic echo cancellation challenge ([AEC-Challenge](https://aec-challenge.azurewebsites.net/index.html)) organized by Microsoft. The DTLN-aec model is among the top-five models of the challenge. The results of the AEC-Challenge can be found [here](https://aec-challenge.azurewebsites.net/results.html).
 
