@@ -61,14 +61,20 @@ def process_file(model, audio_file_name, out_file_name):
 
     # calculate number of frames
     num_blocks = (audio.shape[0] - (block_len - block_shift)) // block_shift
-    q1 = multiprocessing.Queue()
-    q2 = multiprocessing.Queue()
-    q3 = multiprocessing.Queue()
+    q1 = multiprocessing.JoinableQueue(maxsize=1)
+    q2 = multiprocessing.Queue(maxsize=1)
 
-    def shifter(_q, audio, lpb, num_blocks):
+    def stage1(model, audio, lpb, _qo, threads):
         in_buffer = np.zeros((block_len)).astype("float32")
         in_buffer_lpb = np.zeros((block_len)).astype("float32")
+        interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=threads)
+        interpreter_1.allocate_tensors()
+        input_details_1 = interpreter_1.get_input_details()
+        output_details_1 = interpreter_1.get_output_details()
+        states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
+
         for idx in range(num_blocks):
+            # _qo.join()
             # shift values and write to buffer of the input audio
             in_buffer[:-block_shift] = in_buffer[block_shift:]
             in_buffer[-block_shift:] = audio[
@@ -80,21 +86,6 @@ def process_file(model, audio_file_name, out_file_name):
                 idx * block_shift : (idx * block_shift) + block_shift
             ]
 
-            _q.put((in_buffer.copy(), in_buffer_lpb.copy()))
-        _q.put((None, None))
-
-    def stage1(model, _qi, _qo, threads):
-        interpreter_1 = tflite.Interpreter(model_path=model + "_1.tflite", num_threads=threads)
-        interpreter_1.allocate_tensors()
-        input_details_1 = interpreter_1.get_input_details()
-        output_details_1 = interpreter_1.get_output_details()
-        states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
-        # idx = 0
-        while True:
-            in_buffer, in_buffer_lpb = _qi.get()
-            if in_buffer is None:
-                _qo.put((None, None))
-                return
             # calculate fft of input block
             in_block_fft = np.fft.rfft(np.squeeze(in_buffer)).astype("complex64")
 
@@ -114,12 +105,19 @@ def process_file(model, audio_file_name, out_file_name):
             # # get the output of the first block
             out_mask = interpreter_1.get_tensor(output_details_1[0]["index"])
             states_1 = interpreter_1.get_tensor(output_details_1[1]["index"])
+
             # apply mask and calculate the ifft
             estimated_block = np.fft.irfft(in_block_fft * out_mask)
             # reshape the time domain frames
             estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
             in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
+
             _qo.put((estimated_block.copy(), in_lpb.copy()))
+
+            # print("stage1 (%s)" % idx)
+            # idx += 1
+        
+        _qo.put((None, None))
    
 
     def stage2(model, _qi, _qo, threads):
@@ -128,6 +126,7 @@ def process_file(model, audio_file_name, out_file_name):
         input_details_2 = interpreter_2.get_input_details()
         output_details_2 = interpreter_2.get_output_details()
         states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
+        # idx = 0
         while True:
             estimated_block, in_lpb = _qi.get()
             if estimated_block is None:
@@ -145,19 +144,23 @@ def process_file(model, audio_file_name, out_file_name):
             states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
 
             _qo.put(out_block.copy())
+            # _qi.task_done()
+
+            # print("stage2 (%s)" % idx)
+            # idx += 1
+
+    p1 = multiprocessing.Process(target=stage1, args=(model, audio, lpb, q1, args.threads))
+    p2 = multiprocessing.Process(target=stage2, args=(model, q1, q2, args.threads))
 
 
-    p1 = multiprocessing.Process(target=shifter, args=[q1, audio, lpb, num_blocks])
-    p2 = multiprocessing.Process(target=stage1, args=(model, q1, q2, args.threads))
-    p3 = multiprocessing.Process(target=stage2, args=(model, q2, q3, args.threads))
-    for p in [p1, p2, p3]:
+    for p in [p1, p2]:
         p.start()
 
     out_buffer = np.zeros((block_len)).astype("float32")
     time_array = []
     for idx in range(num_blocks):
         s = time.time()
-        out_block =  q3.get()
+        out_block =  q2.get()
         time_array.append(time.time()-s)
         # shift values and write to buffer
         out_buffer[:-block_shift] = out_buffer[block_shift:]
@@ -167,10 +170,8 @@ def process_file(model, audio_file_name, out_file_name):
             :block_shift
         ]
 
-
-    for p in [p1, p2, p3]:
+    for p in [p1, p2]:
         p.join()
-
 
     # cut audio to otiginal length
     predicted_speech = out_file[
