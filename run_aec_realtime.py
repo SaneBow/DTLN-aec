@@ -54,8 +54,11 @@ args = parser.parse_args()
 interpreter_1 = tflite.Interpreter(model_path=args.model + "_1.tflite", num_threads=args.threads)
 interpreter_1.allocate_tensors()
 input_details_1 = interpreter_1.get_input_details()
+in_idx = next(i for i in input_details_1 if i["name"] == "input_3")["index"]
+lpb_idx = next(i for i in input_details_1 if i["name"] == "input_4")["index"]
+states_idx = next(i for i in input_details_1 if i["name"] == "input_5")["index"]
 output_details_1 = interpreter_1.get_output_details()
-states_1 = np.zeros(input_details_1[1]["shape"]).astype("float32")
+states_1 = np.zeros(input_details_1[states_idx]["shape"]).astype("float32")
 
 q1 = multiprocessing.JoinableQueue(maxsize=1)
 q2 = multiprocessing.Queue(maxsize=1)
@@ -85,9 +88,9 @@ def callback(indata, outdata, frames, time, status):
     lpb_mag = np.abs(lpb_block_fft)
     lpb_mag = np.reshape(lpb_mag, (1, 1, -1)).astype("float32")
     # set tensors to the first model
-    interpreter_1.set_tensor(input_details_1[0]["index"], in_mag)
-    interpreter_1.set_tensor(input_details_1[2]["index"], lpb_mag)
-    interpreter_1.set_tensor(input_details_1[1]["index"], states_1)
+    interpreter_1.set_tensor(input_details_1[in_idx]["index"], in_mag)
+    interpreter_1.set_tensor(input_details_1[lpb_idx]["index"], lpb_mag)
+    interpreter_1.set_tensor(input_details_1[states_idx]["index"], states_1)
     # run calculation
     interpreter_1.invoke()
     # # get the output of the first block
@@ -119,8 +122,11 @@ def stage2(model, _qi, _qo, threads):
     interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=threads)
     interpreter_2.allocate_tensors()
     input_details_2 = interpreter_2.get_input_details()
+    est_idx = next(i for i in input_details_2 if i["name"] == "input_6")["index"]
+    lpb_idx = next(i for i in input_details_2 if i["name"] == "input_7")["index"]
+    states_idx = next(i for i in input_details_2 if i["name"] == "input_8")["index"]
     output_details_2 = interpreter_2.get_output_details()
-    states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
+    states_2 = np.zeros(input_details_2[states_idx]["shape"]).astype("float32")
     while True:
         estimated_block, in_lpb = _qi.get()
         if estimated_block is None:
@@ -128,9 +134,9 @@ def stage2(model, _qi, _qo, threads):
             return
 
         # set tensors to the second block
-        interpreter_2.set_tensor(input_details_2[1]["index"], states_2)
-        interpreter_2.set_tensor(input_details_2[0]["index"], estimated_block)
-        interpreter_2.set_tensor(input_details_2[2]["index"], in_lpb)
+        interpreter_2.set_tensor(input_details_2[states_idx]["index"], states_2)
+        interpreter_2.set_tensor(input_details_2[est_idx]["index"], estimated_block)
+        interpreter_2.set_tensor(input_details_2[lpb_idx]["index"], in_lpb)
         # run calculation
         interpreter_2.invoke()
         # get output tensors
