@@ -25,6 +25,7 @@ import argparse
 # import tensorflow.lite as tflite
 import tflite_runtime.interpreter as tflite
 import multiprocessing
+import signal
 
 # make GPUs invisible
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -60,11 +61,12 @@ q1 = multiprocessing.JoinableQueue(maxsize=1)
 q2 = multiprocessing.Queue(maxsize=1)
 
 
-def in_callback(indata, frames, time, status):
-    global in_buffer, in_buffer_lpb, states_1
+def callback(indata, outdata, frames, time, status):
+    global in_buffer, out_buffer, in_buffer_lpb, states_1
     if status:
         print(status)
     # start_time = otime.time()
+
     # write mic stream to buffer
     in_buffer[:-block_shift] = in_buffer[block_shift:]
     in_buffer[-block_shift:] = np.squeeze(indata[:, 0])
@@ -100,14 +102,9 @@ def in_callback(indata, frames, time, status):
 
     q1.put((estimated_block.copy(), in_lpb.copy()))
 
-    # print((otime.time() - start_time) * 1000)
-
-
-def out_callback(outdata, frames, time, status):
-    global out_buffer
-    if status:
-        print(status)
     out_block = q2.get()
+    if out_block is None:
+        return
     # shift values and write to buffer
     # write to buffer
     out_buffer[:-block_shift] = out_buffer[block_shift:]
@@ -115,7 +112,8 @@ def out_callback(outdata, frames, time, status):
     out_buffer  += np.squeeze(out_block)
     # output to soundcard
     outdata[:] = np.expand_dims(out_buffer[:block_shift], axis=-1)
-    
+
+    # print((otime.time() - start_time) * 1000)
 
 def stage2(model, _qi, _qo, threads):
     interpreter_2 = tflite.Interpreter(model_path=model + "_2.tflite", num_threads=threads)
@@ -142,26 +140,25 @@ def stage2(model, _qi, _qo, threads):
         _qo.put(out_block.copy())
         # _qi.task_done()
 
-
+original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
 p2 = multiprocessing.Process(target=stage2, args=(args.model, q1, q2, args.threads))
-
+signal.signal(signal.SIGINT, original_sigint_handler)
+q2.put(None)
 p2.start()
 
 try:
-    with sd.InputStream(device=args.input_device,
+    with sd.Stream(device=(args.input_device, args.output_device),
                 samplerate=16000, blocksize=block_shift,
                 dtype=np.float32, latency=args.latency,
-                channels=args.channels, callback=in_callback), sd.OutputStream(device=args.output_device,
-                samplerate=16000, blocksize=block_shift,
-                dtype=np.float32, latency=args.latency,
-                channels=1, callback=out_callback):
+                channels=(args.channels, 1), callback=callback):
         print('#' * 80)
         print('press Return to quit')
         print('#' * 80)
         input()
 except KeyboardInterrupt:
-    q1.put(None)
-    p2.join()
-    parser.exit('')
+    p2.terminate()
 except Exception as e:
-    parser.exit(type(e).__name__ + ': ' + str(e))
+    p2.terminate()
+    raise
+finally:
+    p2.join()
