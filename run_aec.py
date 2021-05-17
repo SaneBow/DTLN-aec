@@ -24,7 +24,6 @@ import argparse
 # import tensorflow.lite as tflite
 import tflite_runtime.interpreter as tflite
 import multiprocessing
-from termcolor import colored
 
 # make GPUs invisible
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -76,7 +75,6 @@ def process_file(model, audio_file_name, out_file_name):
 
         for idx in range(num_blocks):
             # _qo.join()
-            print(colored('> stage 1', 'green'), idx, time.time() % 1 * 1000)
             # shift values and write to buffer of the input audio
             in_buffer[:-block_shift] = in_buffer[block_shift:]
             in_buffer[-block_shift:] = audio[
@@ -114,8 +112,6 @@ def process_file(model, audio_file_name, out_file_name):
             estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
             in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
 
-            print(colored('< stage 1', 'green'), idx, time.time() % 1 * 1000)
-
             _qo.put((estimated_block.copy(), in_lpb.copy()))
 
         _qo.put((None, None))
@@ -127,13 +123,11 @@ def process_file(model, audio_file_name, out_file_name):
         input_details_2 = interpreter_2.get_input_details()
         output_details_2 = interpreter_2.get_output_details()
         states_2 = np.zeros(input_details_2[1]["shape"]).astype("float32")
-        idx = 0
         while True:
             estimated_block, in_lpb = _qi.get()
             if estimated_block is None:
                 _qo.put(None)
                 return
-            print(colored('> stage 2', 'red'), idx, time.time() % 1 * 1000)
             # set tensors to the second block
             interpreter_2.set_tensor(input_details_2[1]["index"], states_2)
             interpreter_2.set_tensor(input_details_2[0]["index"], estimated_block)
@@ -145,9 +139,6 @@ def process_file(model, audio_file_name, out_file_name):
             states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
 
             _qo.put(out_block.copy())
-
-            print(colored('< stage 2', 'red'), idx, time.time())
-            idx += 1
             # _qi.task_done()
 
     p1 = multiprocessing.Process(target=stage1, args=(model, audio, lpb, q1, args.threads))
