@@ -107,7 +107,7 @@ def callback(indata, outdata, frames, time, status):
     estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
     in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
 
-    q1.put((estimated_block, in_lpb)
+    q1.put((estimated_block, in_lpb))
 
     out_block = q2.get()
     if out_block is None:
