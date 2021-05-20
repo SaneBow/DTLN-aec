@@ -49,6 +49,7 @@ parser.add_argument("--model", "-m", help="name of tf-lite model")
 parser.add_argument("--latency", "-l", type=float, default=0, help="latency of sound device")
 parser.add_argument("--threads", "-t", type=int, default=1, help="set thread number for interpreters")
 parser.add_argument("--channels", "-c", type=int, default=2, help="number of input channels")
+parser.add_argument('-n', '--no-aec', action='store_true', help='turn off AEC, pass-through')
 args = parser.parse_args()
 
 interpreter_1 = tflite.Interpreter(model_path=args.model + "_1.tflite", num_threads=args.threads)
@@ -68,6 +69,9 @@ def callback(indata, outdata, frames, time, status):
     global in_buffer, out_buffer, in_buffer_lpb, states_1
     if status:
         print(status)
+    if args.no_aec:
+        outdata[:, 0] = indata[:, 0]
+        return
     # start_time = otime.time()
 
     # write mic stream to buffer
@@ -146,13 +150,12 @@ def stage2(model, _qi, _qo, threads):
         _qo.put(out_block.copy())
         # _qi.task_done()
 
-original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
 p2 = multiprocessing.Process(target=stage2, args=(args.model, q1, q2, args.threads))
-signal.signal(signal.SIGINT, original_sigint_handler)
+p2.daemon = True
 q2.put(None)
-p2.start()
 
 try:
+    p2.start()
     with sd.Stream(device=(args.input_device, args.output_device),
                 samplerate=16000, blocksize=block_shift,
                 dtype=np.float32, latency=args.latency,
@@ -162,9 +165,9 @@ try:
         print('#' * 80)
         input()
 except KeyboardInterrupt:
-    p2.terminate()
+    print("Keyboard interrupt, terminating ...")
 except Exception as e:
-    p2.terminate()
     raise
 finally:
+    p2.terminate()
     p2.join()
