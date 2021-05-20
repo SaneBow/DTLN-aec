@@ -107,7 +107,7 @@ def callback(indata, outdata, frames, time, status):
     estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
     in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
 
-    q1.put((estimated_block.copy(), in_lpb.copy()))
+    q1.put((estimated_block, in_lpb)
 
     out_block = q2.get()
     if out_block is None:
@@ -147,7 +147,7 @@ def stage2(model, _qi, _qo, threads):
         out_block = interpreter_2.get_tensor(output_details_2[0]["index"])
         states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
 
-        _qo.put(out_block.copy())
+        _qo.put(out_block)
         # _qi.task_done()
 
 p2 = multiprocessing.Process(target=stage2, args=(args.model, q1, q2, args.threads))
