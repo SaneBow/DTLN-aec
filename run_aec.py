@@ -116,7 +116,7 @@ def process_file(model, audio_file_name, out_file_name):
             estimated_block = np.reshape(estimated_block, (1, 1, -1)).astype("float32")
             in_lpb = np.reshape(in_buffer_lpb, (1, 1, -1)).astype("float32")
 
-            _qo.put((estimated_block.copy(), in_lpb.copy()))
+            _qo.put((estimated_block, in_lpb))
 
         _qo.put((None, None))
    
@@ -145,7 +145,7 @@ def process_file(model, audio_file_name, out_file_name):
             out_block = interpreter_2.get_tensor(output_details_2[0]["index"])
             states_2 = interpreter_2.get_tensor(output_details_2[1]["index"])
 
-            _qo.put(out_block.copy())
+            _qo.put(out_block)
             # _qi.task_done()
 
     p1 = multiprocessing.Process(target=stage1, args=(model, audio, lpb, q1, args.threads))
